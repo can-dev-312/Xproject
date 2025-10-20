@@ -74,7 +74,7 @@ public class User {
         this.surname = surname;
     }
 
-    public boolean isHasCreditLimit() {
+    public boolean hasCreditLimit() {
         return hasCreditLimit;
     }
 

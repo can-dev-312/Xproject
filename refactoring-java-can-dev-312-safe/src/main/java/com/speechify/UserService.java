@@ -14,6 +14,12 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 
 public class UserService {
     private static final String DB_FILE = "db.json";
+    private static final int MIN_AGE = 21;
+    private static final double DEFAULT_CREDIT_LIMIT = 10000.0;
+    private static final double IMPORTANT_CLIENT_MULTIPLIER = 2.0;
+    private static final String VERY_IMPORTANT_CLIENT = "VeryImportantClient";
+    private static final String IMPORTANT_CLIENT = "ImportantClient";
+    
     private final ObjectMapper objectMapper;
     private ClientRepository clientRepository;
 
@@ -29,32 +35,28 @@ public class UserService {
             String clientId) {
         return CompletableFuture.supplyAsync(() -> {
             try {
-                if (firstname == null || surname == null || email == null) {
+                // Validate input
+                if (!isValidUserInput(firstname, surname, email)) {
                     return false;
                 }
-
-                File dbFile = new File(DB_FILE);
-                if (!dbFile.exists()) {
+                
+                if (!isAgeValid(dateOfBirth)) {
                     return false;
                 }
-
-                ObjectNode root = (ObjectNode) objectMapper.readTree(dbFile);
+                
+                // Read database
+                ObjectNode root = readDatabase();
+                if (root == null) {
+                    return false;
+                }
+                
                 ArrayNode users = (ArrayNode) root.get("users");
-
-                // Check if user with email already exists
-                for (int i = 0; i < users.size(); i++) {
-                    ObjectNode userNode = (ObjectNode) users.get(i);
-                    if (userNode.get("email").asText().equals(email)) {
-                        return false;
-                    }
-                }
-
-                // Check age
-                int age = Period.between(dateOfBirth, LocalDate.now()).getYears();
-                if (age < 21) {
+                
+                // Check email uniqueness
+                if (!isEmailUnique(users, email)) {
                     return false;
                 }
-
+                
                 // Get client
                 clientRepository = new ClientRepository();
                 Client client = clientRepository.getById(clientId).join();
@@ -62,32 +64,15 @@ public class UserService {
                     System.err.println("Client not found");
                     return false;
                 }
-
-                // Create user
-                User user = new User();
-                user.setId(UUID.randomUUID().toString());
-                user.setClient(client);
-                user.setDateOfBirth(dateOfBirth);
-                user.setEmail(email);
-                user.setFirstname(firstname);
-                user.setSurname(surname);
-
-                // Set credit limit based on client
-                if ("VeryImportantClient".equals(client.getName())) {
-                    user.setHasCreditLimit(false);
-                } else if ("ImportantClient".equals(client.getName())) {
-                    user.setHasCreditLimit(true);
-                    user.setCreditLimit(10000 * 2);
-                } else {
-                    user.setHasCreditLimit(true);
-                    user.setCreditLimit(10000);
-                }
-
-                // Add user to database
+                
+                // Create and save user
+                User user = createUser(client, dateOfBirth, email, firstname, surname);
                 users.add(objectMapper.valueToTree(user));
-                objectMapper.writeValue(dbFile, root);
-                return true;
+                
+                return saveDatabase(root);
+                
             } catch (IOException e) {
+                System.err.println("Database operation failed: " + e.getMessage());
                 return false;
             }
         });
@@ -100,12 +85,11 @@ public class UserService {
                     return false;
                 }
 
-                File dbFile = new File(DB_FILE);
-                if (!dbFile.exists()) {
+                ObjectNode root = readDatabase();
+                if (root == null) {
                     return false;
                 }
 
-                ObjectNode root = (ObjectNode) objectMapper.readTree(dbFile);
                 ArrayNode users = (ArrayNode) root.get("users");
 
                 // Find and update user
@@ -113,12 +97,12 @@ public class UserService {
                     ObjectNode userNode = (ObjectNode) users.get(i);
                     if (userNode.get("id").asText().equals(user.getId())) {
                         users.set(i, objectMapper.valueToTree(user));
-                        objectMapper.writeValue(dbFile, root);
-                        return true;
+                        return saveDatabase(root);
                     }
                 }
                 return false;
             } catch (IOException e) {
+                System.err.println("Database operation failed: " + e.getMessage());
                 return false;
             }
         });
@@ -127,12 +111,11 @@ public class UserService {
     public CompletableFuture<List<User>> getAllUsers() {
         return CompletableFuture.supplyAsync(() -> {
             try {
-                File dbFile = new File(DB_FILE);
-                if (!dbFile.exists()) {
+                ObjectNode root = readDatabase();
+                if (root == null) {
                     return new ArrayList<>();
                 }
 
-                ObjectNode root = (ObjectNode) objectMapper.readTree(dbFile);
                 ArrayNode users = (ArrayNode) root.get("users");
                 List<User> userList = new ArrayList<>();
 
@@ -140,8 +123,10 @@ public class UserService {
                     User user = objectMapper.treeToValue(users.get(i), User.class);
                     userList.add(user);
                 }
+                
                 return userList;
             } catch (IOException e) {
+                System.err.println("Database operation failed: " + e.getMessage());
                 return new ArrayList<>();
             }
         });
@@ -150,24 +135,91 @@ public class UserService {
     public CompletableFuture<User> getUserByEmail(String email) {
         return CompletableFuture.supplyAsync(() -> {
             try {
-                File dbFile = new File(DB_FILE);
-                if (!dbFile.exists()) {
+                ObjectNode root = readDatabase();
+                if (root == null) {
                     return null;
                 }
 
-                ObjectNode root = (ObjectNode) objectMapper.readTree(dbFile);
                 ArrayNode users = (ArrayNode) root.get("users");
 
                 for (int i = 0; i < users.size(); i++) {
                     ObjectNode userNode = (ObjectNode) users.get(i);
                     if (userNode.get("email").asText().equals(email)) {
-                        return objectMapper.treeToValue(userNode, User.class);
+                        User user = objectMapper.treeToValue(userNode, User.class);
+                        return user;
                     }
                 }
                 return null;
             } catch (IOException e) {
+                System.err.println("Database operation failed: " + e.getMessage());
                 return null;
             }
         });
+    }
+    
+    // Extracted helper methods
+    private boolean isValidUserInput(String firstname, String surname, String email) {
+        return firstname != null && surname != null && email != null;
+    }
+    
+    private boolean isAgeValid(LocalDate dateOfBirth) {
+        int age = Period.between(dateOfBirth, LocalDate.now()).getYears();
+        return age >= MIN_AGE;
+    }
+    
+    private boolean isEmailUnique(ArrayNode users, String email) {
+        for (int i = 0; i < users.size(); i++) {
+            ObjectNode userNode = (ObjectNode) users.get(i);
+            if (userNode.get("email").asText().equals(email)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    
+    private ObjectNode readDatabase() throws IOException {
+        File dbFile = new File(DB_FILE);
+        if (!dbFile.exists()) {
+            return null;
+        }
+        return (ObjectNode) objectMapper.readTree(dbFile);
+    }
+    
+    private boolean saveDatabase(ObjectNode root) {
+        try {
+            File dbFile = new File(DB_FILE);
+            objectMapper.writeValue(dbFile, root);
+            return true;
+        } catch (IOException e) {
+            System.err.println("Database save failed: " + e.getMessage());
+            return false;
+        }
+    }
+    
+    private User createUser(Client client, LocalDate dateOfBirth, String email, 
+                           String firstname, String surname) {
+        User user = new User();
+        user.setId(UUID.randomUUID().toString());
+        user.setClient(client);
+        user.setDateOfBirth(dateOfBirth);
+        user.setEmail(email);
+        user.setFirstname(firstname);
+        user.setSurname(surname);
+        
+        setCreditLimitBasedOnClient(user, client);
+        return user;
+    }
+    
+    private void setCreditLimitBasedOnClient(User user, Client client) {
+        String clientName = client.getName();
+        if (VERY_IMPORTANT_CLIENT.equals(clientName)) {
+            user.setHasCreditLimit(false);
+        } else if (IMPORTANT_CLIENT.equals(clientName)) {
+            user.setHasCreditLimit(true);
+            user.setCreditLimit(DEFAULT_CREDIT_LIMIT * IMPORTANT_CLIENT_MULTIPLIER);
+        } else {
+            user.setHasCreditLimit(true);
+            user.setCreditLimit(DEFAULT_CREDIT_LIMIT);
+        }
     }
 } 
