@@ -85,7 +85,7 @@ public class ClientRepository {
                     client.setName(clientNode.get("name").asText());
                     clientList.add(client);
                     // Also cache individual clients by ID
-                    clientIdCache.set(client.getId(), client);
+                   clientIdCache.set(client.getId(), client); 
                 }
                 
                 // Cache the complete list
